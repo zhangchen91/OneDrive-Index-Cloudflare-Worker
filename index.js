@@ -22,10 +22,10 @@ const config = {
      * Difference between `Entire File Cache` and `Chunked Cache`
      * 
      * `Entire File Cache` requires the entire file to be transferred to the Cloudflare server before 
-     *  the first byte sent to a client.
+     *  the first byte sent to a client.
      * 
-     * `Chunked Cache` would stream the file content to the client while caching it.
-     *  But there is no exact Content-Length in the response headers. ( Content-Length: chunked )
+     * `Chunked Cache` would stream the file content to the client while caching it.
+     *  But there is no exact Content-Length in the response headers. ( Content-Length: chunked )
      * 
      */
     "cache": {
@@ -43,6 +43,10 @@ const config = {
      */
     "thumbnail": true,
     /**
+     * 
+     */
+    "preview": true,
+    /**
      * Small File Upload ( <= 4MB )
      * example: POST https://storage.idx0.workers.dev/Images/?upload=<filename>&key=<secret_key>
      */
@@ -55,7 +59,7 @@ const config = {
      * Use Cloudflare as a relay to speed up download. ( especially in Mainland China )
      * example: https://storage.idx0.workers.dev/Images/def.png?proxied
      */
-    "proxyDownload": true,
+    "proxyDownload": false,
 };
 
 /**
@@ -199,8 +203,8 @@ async function getAccessToken() {
  */
 function mime2icon(type) {
     if (type.startsWith("image")) return "image";
-    if (type.startsWith("image")) return "video_label";
-    if (type.startsWith("image")) return "audiotrack";
+    if (type.startsWith("video")) return "video_label";
+    if (type.startsWith("audio")) return "audiotrack";
     return "description";
 }
 
@@ -325,7 +329,7 @@ async function handleRequest(request) {
 
     const thumbnail = config.thumbnail ? searchParams.get("thumbnail") : false;
     const proxied = config.proxyDownload ? (searchParams.get("proxied") === null ? false : true) : false;
-
+    const preview = searchParams.get("preview");
 
     if (thumbnail) {
         const url = `https://graph.microsoft.com/v1.0/me/drive/root:${base+(pathname == "/" ? "" :pathname) }:/thumbnails/0/${thumbnail}/content`;
@@ -348,9 +352,21 @@ async function handleRequest(request) {
         }
     });
     let error = null;
+
     if (resp.ok) {
         const data = await resp.json();
         if ("file" in data) {
+            if (preview) {
+                if (mime2icon(data.file.mimeType) === 'video_label') {
+                    return new Response(renderVideoIndex(data), {
+                        headers: {
+                            'Access-Control-Allow-Origin': '*',
+                            'content-type': 'text/html'
+                        }
+                    });
+                }
+            }
+
             return await handleFile(request, pathname, data["@microsoft.graph.downloadUrl"], {
                 proxied,
                 fileSize: data["size"]
@@ -370,6 +386,7 @@ async function handleRequest(request) {
 
             }
             if (!request.url.endsWith("/")) return Response.redirect(request.url + "/", 302)
+
             return new Response(renderFolderIndex(data.children, pathname == "/"), {
                 headers: {
                     'Access-Control-Allow-Origin': '*',
@@ -404,32 +421,50 @@ async function handleRequest(request) {
 
     }
 }
+
+const nav = `<nav><a class="brand">OneDrive Index</a></nav>`;
+const el = (tag, attrs, content) => `<${tag} ${attrs.join(" ")}>${content}</${tag}>`;
+const div = (className, content, style) => el("div", [`class=${className}`, style], content);
+const folder = (icon, filename, size) => el("a", [`href="${filename}/"`, `class="item"`, size ? `size="${size}"` : ""], el("i", [`class="material-icons"`], icon) + filename)
+const file = (icon, filename, size) => el("a", [`href="${filename}${config.preview ? '?preview=1' : ''}"`, `class="item"`, size ? `size="${size}"` : ""], el("i", [`class="material-icons"`], icon) + filename)
+const video = (filename) => el("video", [`id="player" playsinline controls`], el("source", [`src="${filename}"`, `type="video/mp4"`], ""))
+
+/**
+ * Render File Index
+ * @param {*} items 
+ * @param {*} isIndex don't show ".." on index page.
+ */
+function renderVideoIndex(i) {const video = (filename) => el("video", [`id="player" playsinline controls`], el("source", [`src="${filename}"`, `type="video/mp4"`], ""))
+    return renderHTML(nav + div("container", div("items", el("div", [''],
+        folder("folder", ".") +
+        video(i.name)
+    )), `style="width: 100%; max-width: none;"`),
+    `<link rel="stylesheet" href="https://cdn.plyr.io/3.6.2/plyr.css" />`,
+    `<script src="https://cdnjs.cloudflare.com/ajax/libs/plyr/3.6.2/plyr.min.js"></script>
+      <script>const player = new Plyr('#player');</script>`);
+}
+
+
 /**
  * Render Folder Index
  * @param {*} items 
  * @param {*} isIndex don't show ".." on index page.
  */
 function renderFolderIndex(items, isIndex) {
-    const nav = `<nav><a class="brand">OneDrive Index</a></nav>`;
-    const el = (tag, attrs, content) => `<${tag} ${attrs.join(" ")}>${content}</${tag}>`;
-    const div = (className, content) => el("div", [`class=${className}`], content);
-    const item = (icon, filename, size) => el("a", [`href="${filename}"`, `class="item"`, size ? `size="${size}"` : ""], el("i", [`class="material-icons"`], icon) + filename)
-
-    return renderHTML(nav + div("container", div("items", el("div", ['style="min-width:600px"'],
-        (!isIndex ? item("folder", "..") : "") +
+    return renderHTML(nav + div("container", div("items", el("div", [''],
+        (!isIndex ? folder("folder", "..") : "") +
         items.map((i) => {
             if ("folder" in i) {
-                return item("folder", i.name, i.size)
+                return folder("folder", i.name, i.size)
             } else if ("file" in i) {
-                return item(mime2icon(i.file.mimeType), i.name, i.size)
+                return file(mime2icon(i.file.mimeType), i.name, i.size)
             } else console.log(`unknown item type ${i}`)
         }).join("")
-    ))));
+    )), `style="width: 100%; max-width: none;"`));
 }
 
 
-
-function renderHTML(body) {
+function renderHTML(body, injectCSS = '', injectJS = '') {
     return `<!DOCTYPE html>
   <html lang="en">
     <head>
@@ -440,6 +475,7 @@ function renderHTML(body) {
       <link href='https://fonts.loli.net/icon?family=Material+Icons' rel='stylesheet'>
       <link href='https://cdn.jsdelivr.net/gh/heymind/OneDrive-Index-Cloudflare-Worker/themes/material.css' rel='stylesheet'>
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.17.1/themes/prism-solarizedlight.css">
+      ${injectCSS}
       <script type="module" src='https://cdn.jsdelivr.net/gh/heymind/OneDrive-Index-Cloudflare-Worker/script.js'></script>
     </head>
     <body>
@@ -448,6 +484,7 @@ function renderHTML(body) {
       <footer><p>Powered by <a href="https://github.com/heymind/OneDrive-Index-Cloudflare-Worker">OneDrive-Index-CF</a>, hosted on <a href="https://www.cloudflare.com/products/cloudflare-workers/">Cloudflare Workers</a>.</p></footer>
       <script src="https://cdn.jsdelivr.net/npm/prismjs@1.17.1/prism.min.js" data-manual></script>
       <script src="https://cdn.jsdelivr.net/npm/prismjs@1.17.1/plugins/autoloader/prism-autoloader.min.js"></script>
+      ${injectJS}
     </body>
   </html>`
 }
